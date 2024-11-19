@@ -25,6 +25,7 @@
 char *argv0;
 
 enum {
+	BG,
 	INIT,
 	INPUT,
 	FAILED,
@@ -36,6 +37,8 @@ struct lock {
 	Window root, win;
 	Pixmap pmap;
 	unsigned long colors[NUMCOLS];
+	GC gc;
+	XRRScreenResources *rrsr;
 };
 
 struct xrandr {
@@ -125,12 +128,68 @@ gethash(void)
 }
 
 static void
+draw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
+     unsigned int color, unsigned int len)
+{
+	int screen, crtc;
+	XRRCrtcInfo* rrci;
+
+	if (rr->active) {
+		for (screen = 0; screen < nscreens; screen++) {
+			XSetWindowBackground(dpy, locks[screen]->win,locks[screen]->colors[BG]);
+			XClearWindow(dpy, locks[screen]->win);
+			XSetForeground(dpy, locks[screen]->gc, locks[screen]->colors[color]);
+			for (crtc = 0; crtc < locks[screen]->rrsr->ncrtc; ++crtc) {
+				rrci = XRRGetCrtcInfo(dpy,
+				                      locks[screen]->rrsr,
+				                      locks[screen]->rrsr->crtcs[crtc]);
+				/* skip disabled crtc */
+				if (rrci->noutput > 0) {
+					int leftBound = rrci->x + (rrci->width - len * shapesize - (len - 1) * shapegap) / 2;
+					for (int shapei = 0; shapei < len; shapei++) {
+						int x = leftBound + shapei * (shapesize + shapegap);
+						if (shape == 0) {
+							XFillRectangle(dpy,
+								       locks[screen]->win,
+								       locks[screen]->gc,
+								       x,
+								       rrci->y + (rrci->height - shapesize) / 2,
+								       shapesize,
+								       shapesize);
+						} else if (shape == 1) {
+							XFillArc(dpy,
+								 locks[screen]->win,
+								 locks[screen]->gc,
+								 x,
+								 rrci->y + (rrci->height - shapesize) / 2,
+								 shapesize,
+								 shapesize,
+								 0,
+								 360 * 64);
+						}
+					}
+
+				}
+				XRRFreeCrtcInfo(rrci);
+			}
+		}
+	} else {
+		for (screen = 0; screen < nscreens; screen++) {
+			XSetWindowBackground(dpy,
+			                     locks[screen]->win,
+			                     locks[screen]->colors[color]);
+			XClearWindow(dpy, locks[screen]->win);
+		}
+	}
+}
+
+static void
 readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
        const char *hash)
 {
 	XRRScreenChangeNotifyEvent *rre;
 	char buf[32], passwd[256], *inputhash;
-	int num, screen, running, failure, oldc;
+	int num, screen, running, failure, oldc, oldlen;
 	unsigned int len, color;
 	KeySym ksym;
 	XEvent ev;
@@ -139,6 +198,7 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 	running = 1;
 	failure = 0;
 	oldc = INIT;
+	oldlen = 0;
 
 	while (running && !XNextEvent(dpy, &ev)) {
 		if (ev.type == KeyPress) {
@@ -150,7 +210,8 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 				else if (ksym >= XK_KP_0 && ksym <= XK_KP_9)
 					ksym = (ksym - XK_KP_0) + XK_0;
 			}
-			if (IsFunctionKey(ksym) ||
+			if (IsModifierKey(ksym) ||
+          IsFunctionKey(ksym) ||
 			    IsKeypadKey(ksym) ||
 			    IsMiscFunctionKey(ksym) ||
 			    IsPFKey(ksym) ||
@@ -188,14 +249,14 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 				break;
 			}
 			color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
-			if (running && oldc != color) {
-				for (screen = 0; screen < nscreens; screen++) {
-					XSetWindowBackground(dpy,
-					                     locks[screen]->win,
-					                     locks[screen]->colors[color]);
-					XClearWindow(dpy, locks[screen]->win);
+			if (running && (oldc != color || oldlen != len)) {
+				int lenToUse = len;
+				if (lenToUse < 1) {
+					lenToUse = 1;
 				}
+				draw(dpy, rr, locks, nscreens, color, lenToUse);
 				oldc = color;
+				oldlen = len;
 			}
 		} else if (rr->active && ev.type == rr->evbase + RRScreenChangeNotify) {
 			rre = (XRRScreenChangeNotifyEvent*)&ev;
@@ -228,6 +289,7 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 	XColor color, dummy;
 	XSetWindowAttributes wa;
 	Cursor invisible;
+	XGCValues gcvalues;
 
 	if (dpy == NULL || screen < 0 || !(lock = malloc(sizeof(struct lock))))
 		return NULL;
@@ -243,7 +305,7 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 
 	/* init */
 	wa.override_redirect = 1;
-	wa.background_pixel = lock->colors[INIT];
+	wa.background_pixel = lock->colors[BG];
 	lock->win = XCreateWindow(dpy, lock->root, 0, 0,
 	                          DisplayWidth(dpy, lock->screen),
 	                          DisplayHeight(dpy, lock->screen),
@@ -255,6 +317,10 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 	invisible = XCreatePixmapCursor(dpy, lock->pmap, lock->pmap,
 	                                &color, &color, 0, 0);
 	XDefineCursor(dpy, lock->win, invisible);
+	lock->gc = XCreateGC(dpy, lock->win, 0, &gcvalues);
+	XSetForeground(dpy, lock->gc, lock->colors[INIT]);
+	if (rr->active)
+		lock->rrsr = XRRGetScreenResourcesCurrent(dpy, lock->root);
 
 	/* Try to grab mouse pointer *and* keyboard for 600ms, else fail the lock */
 	for (i = 0, ptgrab = kbgrab = -1; i < 6; i++) {
@@ -387,6 +453,9 @@ main(int argc, char **argv) {
 			_exit(1);
 		}
 	}
+
+	/* draw the initial rectangle */
+	draw(dpy, &rr, locks, nscreens, INIT, 1);
 
 	/* everything is now blank. Wait for the correct password */
 	readpw(dpy, &rr, locks, nscreens, hash);
