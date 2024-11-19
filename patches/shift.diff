@@ -1,0 +1,12 @@
+--- a/slock.c	2024-11-19 01:43:18.660907981 +0000
++++ b/slock.c	2024-11-19 01:45:26.233394327 +0000
+@@ -150,7 +150,8 @@
+ 				else if (ksym >= XK_KP_0 && ksym <= XK_KP_9)
+ 					ksym = (ksym - XK_KP_0) + XK_0;
+ 			}
+-			if (IsFunctionKey(ksym) ||
++			if (IsModifierKey(ksym) ||
++          IsFunctionKey(ksym) ||
+ 			    IsKeypadKey(ksym) ||
+ 			    IsMiscFunctionKey(ksym) ||
+ 			    IsPFKey(ksym) ||
